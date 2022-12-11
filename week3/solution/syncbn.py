@@ -22,17 +22,22 @@ class sync_batch_norm(Function):
         # Also, store relevant quantities to be used on the backward pass with `ctx.save_for_backward`
         batch_sum = torch.sum(input, dim=0)
         batch_squared_sum = torch.sum(input**2, dim=0)
-        batch_num_elem = torch.tensor(input.shape[0], dtype=input.dtype, device=input.device)
+        batch_num_elem = torch.tensor([input.shape[0]],
+                                      dtype=input.dtype,
+                                      device=input.device)
         combined = torch.cat([batch_sum, batch_squared_sum, batch_num_elem], dim=0)
+
         dist.all_reduce(combined, op=dist.ReduceOp.SUM)
-        all_sum, all_squared_sum, all_num_elem = torch.split(combined, [input.shape[1], input.shape[1], 1], dim=0)
+        all_sum, all_squared_sum, all_num_elem = torch.split(combined,
+                                                             [input.shape[1], input.shape[1], 1],
+                                                             dim=0)
+
         mean = all_sum / all_num_elem
-        var = all_squared_sum / all_num_elem - mean ** 2 + eps
-        std = torch.sqrt(var)
-        centered = input - mean
+        var = all_squared_sum / all_num_elem - mean ** 2
+        std = torch.sqrt(var + eps)
         normalized = (input - mean) / std
 
-        ctx.save_for_backward(var, centered)
+        ctx.save_for_backward(batch_num_elem, std, normalized)
         running_mean.data = (running_mean * momentum + mean * (1 - momentum)).data
         running_std.data = (running_std * momentum + std * (1 - momentum)).data
 
@@ -41,14 +46,16 @@ class sync_batch_norm(Function):
     @staticmethod
     def backward(ctx, grad_output):
         # don't forget to return a tuple of gradients wrt all arguments of `forward`!
-        var, centered = ctx.saved_tensors
+        batch_num_elem, std, normalized = ctx.saved_tensors
         batch_grad_sum = grad_output.sum(dim=0)
-        batch_grad_cent_sum = (grad_output * centered).sum(dim=0)
-        batch_num_elem = torch.tensor(grad_output.shape[0], dtype=grad_output.dtype, device=grad_output.device)
-        combined = torch.cat([batch_grad_sum, batch_grad_cent_sum, batch_num_elem], dim=0)
+        batch_grad_norm_sum = (grad_output * normalized).sum(dim=0)
+        combined = torch.cat([batch_grad_sum, batch_grad_norm_sum, batch_num_elem], dim=0)
+
         dist.all_reduce(combined, op=dist.ReduceOp.SUM)
-        all_grad_sum, all_grad_cent_sum, all_num_elem = torch.split(combined, [grad_output.shape[1], grad_output.shape[1], 1])
-        grad_input = (grad_output - (all_grad_cent_sum / var * centered + all_grad_sum) / all_num_elem) / torch.sqrt(var)
+        all_grad_sum, all_grad_norm_sum, all_num_elem = torch.split(combined,
+                                                                    [grad_output.shape[1], grad_output.shape[1], 1])
+
+        grad_input = (grad_output - (all_grad_norm_sum * normalized + all_grad_sum) / all_num_elem) / std
 
         return grad_input, None, None, None, None
 
