@@ -1,6 +1,7 @@
 # PyCharm idea
 .idea/
 
+
 # pytest cache
 **/.pytest_cache
 
